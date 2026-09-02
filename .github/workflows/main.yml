@@ -374,6 +374,14 @@ jobs:
           test_appimage() {
             local test_root="$WORK/test-environment"
 
+            echo "========== AppImage diagnostics =========="
+            file "$APPIMAGE"
+            ls -lh "$APPIMAGE"
+            "$APPIMAGE" --help || true
+            "$APPIMAGE" --appimage-version || true
+            "$APPIMAGE" --appimage-offset || true
+            echo "=========================================="
+
             rm -rf "$test_root"
             mkdir -p "$test_root"
 
@@ -397,8 +405,13 @@ jobs:
               cat /tmp/nethogs-offset.log || true
             fi
 
-            "$APPIMAGE" --appimage-extract \
-              >/tmp/nethogs-extract.log 2>&1
+            APPIMAGE_EXTRACT_AND_RUN=1 \
+              "$APPIMAGE" --appimage-extract \
+              >/tmp/nethogs-extract.log 2>&1 || {
+                echo "AppImage extraction failed:"
+                cat /tmp/nethogs-extract.log
+                return 1
+              }
 
             test -x squashfs-root/usr/bin/nethogs
             test -x squashfs-root/AppRun
@@ -474,13 +487,25 @@ jobs:
             echo "::endgroup::"
             echo "::group::AppImage test attempt ${repair_attempt}"
 
-            if test_appimage 2>&1 | tee "$WORK/test-attempt-${repair_attempt}.log"; then
+            test_status=0
+
+            set +e
+            test_appimage 2>&1 | tee "$WORK/test-attempt-${repair_attempt}.log"
+            test_status=${PIPESTATUS[0]}
+            set -e
+
+            if [ "$test_status" -eq 0 ]; then
               echo "::endgroup::"
               echo "AppImage build and test succeeded."
               exit 0
             fi
 
-            echo "Test failed on attempt ${repair_attempt}"
+            echo "::endgroup::"
+            echo "Test failed on attempt ${repair_attempt} with exit code ${test_status}"
+            echo
+            echo "========== Test log =========="
+            cat "$WORK/test-attempt-${repair_attempt}.log"
+            echo "=============================="
 
             if grep -Eqi \
               'cannot open shared object|no such file or directory|error while loading shared libraries' \
