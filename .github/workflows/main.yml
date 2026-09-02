@@ -87,7 +87,7 @@ jobs:
 
           tar -xzf "nethogs-${NETHOGS_VERSION}.tar.gz"
 
-          git clone --depth=1 --branch "${URUNTIME_VERSION}" \
+          git clone --depth=1 \
             https://github.com/VHSgunzo/uruntime.git
 
           git clone --depth=1 --branch "${SHARUN_VERSION}" \
