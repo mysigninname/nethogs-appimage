@@ -98,38 +98,70 @@ jobs:
         run: |
           set -euxo pipefail
 
+          sudo apt-get update
+          sudo apt-get install -y \
+            musl \
+            musl-dev \
+            musl-tools
+
+          test -x /usr/bin/musl-gcc
+          /usr/bin/musl-gcc --version
+
+          sudo ln -sf /usr/bin/musl-gcc \
+            /usr/local/bin/x86_64-linux-musl-gcc
+
+          test -x /usr/local/bin/x86_64-linux-musl-gcc
+
           cd "$GITHUB_WORKSPACE/work/uruntime"
 
           rustup toolchain install nightly
           rustup target add x86_64-unknown-linux-musl --toolchain nightly
           rustup component add rust-src --toolchain nightly
 
-          CC_x86_64_unknown_linux_musl=musl-gcc \
-          CXX_x86_64_unknown_linux_musl=g++ \
-          AR_x86_64_unknown_linux_musl=ar \
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+          export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+
+          export CC="/usr/bin/musl-gcc"
+          export CXX="/usr/bin/g++"
+          export AR="/usr/bin/ar"
+
+          export CC_x86_64_unknown_linux_musl="/usr/bin/musl-gcc"
+          export CXX_x86_64_unknown_linux_musl="/usr/bin/g++"
+          export AR_x86_64_unknown_linux_musl="/usr/bin/ar"
+
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="/usr/bin/musl-gcc"
+
+          CC="/usr/bin/musl-gcc" \
+          CXX="/usr/bin/g++" \
+          AR="/usr/bin/ar" \
+          CC_x86_64_unknown_linux_musl="/usr/bin/musl-gcc" \
+          CXX_x86_64_unknown_linux_musl="/usr/bin/g++" \
+          AR_x86_64_unknown_linux_musl="/usr/bin/ar" \
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="/usr/bin/musl-gcc" \
           cargo +nightly xtask appimage-squashfs-x86_64
 
           mkdir -p "$GITHUB_WORKSPACE/work/runtime"
 
-          find target -type f \
-            \( -name 'uruntime' -o -name 'uruntime-x86_64' -o -name '*appimage*x86_64*' \) \
-            -executable \
-            -print
-
           RUNTIME_BIN="$(
             find target -type f \
-              \( -name 'uruntime' -o -name 'uruntime-x86_64' -o -name '*appimage*x86_64*' \) \
+              \( \
+                -name 'uruntime' \
+                -o -name 'uruntime-x86_64' \
+                -o -name '*appimage*x86_64*' \
+              \) \
               -executable \
               -print -quit
           )"
 
           test -n "$RUNTIME_BIN"
+
           install -Dm755 "$RUNTIME_BIN" \
             "$GITHUB_WORKSPACE/work/runtime/uruntime"
 
-          "$GITHUB_WORKSPACE/work/runtime/uruntime" --appimage-version || true
+          "$GITHUB_WORKSPACE/work/runtime/uruntime" \
+            --appimage-version || true
+
           file "$GITHUB_WORKSPACE/work/runtime/uruntime"
+
 
       - name: Build sharun
         shell: bash
