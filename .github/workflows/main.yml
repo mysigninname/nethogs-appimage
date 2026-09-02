@@ -55,7 +55,9 @@ jobs:
             libpcap-dev \
             libseccomp-dev \
             linux-libc-dev \
+            llvm \
             meson \
+            musl \
             patchelf \
             pkg-config \
             python3 \
@@ -100,12 +102,16 @@ jobs:
 
           sudo apt-get update
           sudo apt-get install -y \
+            llvm \
             musl \
             musl-dev \
             musl-tools
 
           test -x /usr/bin/musl-gcc
+          test -x /usr/bin/llvm-objcopy
+
           /usr/bin/musl-gcc --version
+          /usr/bin/llvm-objcopy --version
 
           sudo ln -sf /usr/bin/musl-gcc \
             /usr/local/bin/x86_64-linux-musl-gcc
@@ -118,7 +124,15 @@ jobs:
           rustup target add x86_64-unknown-linux-musl --toolchain nightly
           rustup component add rust-src --toolchain nightly
 
-          export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+          export PATH="/usr/local/bin:/usr/lib/llvm-*/bin:/usr/bin:/bin:$PATH"
+
+          if ! command -v llvm-objcopy >/dev/null 2>&1; then
+            LLVM_OBJCOPY="$(find /usr/lib/llvm-* -type f -name llvm-objcopy -print -quit)"
+            test -n "$LLVM_OBJCOPY"
+            sudo ln -sf "$LLVM_OBJCOPY" /usr/local/bin/llvm-objcopy
+          fi
+
+          command -v llvm-objcopy
 
           export CC="/usr/bin/musl-gcc"
           export CXX="/usr/bin/g++"
