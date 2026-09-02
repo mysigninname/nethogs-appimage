@@ -298,7 +298,7 @@ jobs:
           file "$APPIMAGE"
           stat -c '%n %s bytes' "$APPIMAGE"
 
-      - name: Test AppImage locally
+      - name: Test AppImage payload locally
         shell: bash
         run: |
           set -euxo pipefail
@@ -310,46 +310,47 @@ jobs:
           rm -rf "$TEST_ROOT"
           mkdir -p \
             "$TEST_ROOT/home" \
-            "$TEST_ROOT/tmp"
+            "$TEST_ROOT/tmp" \
+            "$TEST_ROOT/extracted"
 
           export HOME="$TEST_ROOT/home"
           export TMPDIR="$TEST_ROOT/tmp"
-          export APPIMAGE_EXTRACT_AND_RUN=1
-          export NO_CLEANUP=1
 
-          cd "$TEST_ROOT"
+          unsquashfs \
+            -d "$TEST_ROOT/extracted" \
+            "$APPIMAGE"
 
-          "$APPIMAGE" --appimage-extract \
-            > extract.log 2>&1
-
-          test -x squashfs-root/AppRun
-          test -x squashfs-root/usr/bin/nethogs
+          test -x "$TEST_ROOT/extracted/AppRun"
+          test -x "$TEST_ROOT/extracted/usr/bin/nethogs"
 
           timeout 15 \
-            "$APPIMAGE" --help \
-            > help.log 2>&1 || {
+            "$TEST_ROOT/extracted/AppRun" \
+            --help \
+            > "$TEST_ROOT/help.log" 2>&1 || {
               rc=$?
               if [ "$rc" -ne 124 ] && [ "$rc" -ne 1 ]; then
-                cat help.log
+                cat "$TEST_ROOT/help.log"
                 exit "$rc"
               fi
             }
 
-          test -s help.log
+          test -s "$TEST_ROOT/help.log"
 
           timeout 15 \
-            "$APPIMAGE" -V \
-            > version.log 2>&1 || {
+            "$TEST_ROOT/extracted/AppRun" \
+            -V \
+            > "$TEST_ROOT/version.log" 2>&1 || {
               rc=$?
               if [ "$rc" -ne 124 ] && [ "$rc" -ne 1 ]; then
-                cat version.log
+                cat "$TEST_ROOT/version.log"
                 exit "$rc"
               fi
             }
 
-          ldd squashfs-root/usr/bin/nethogs || true
+          ldd "$TEST_ROOT/extracted/usr/bin/nethogs" || true
 
-      - name: Test AppImage extraction in Debian
+
+      - name: Test AppImage payload in Debian
         shell: bash
         run: |
           set -euxo pipefail
@@ -364,18 +365,17 @@ jobs:
               mkdir -p /tmp/appimage-test
               cd /tmp/appimage-test
 
-              cp /mnt/build/nethogs-x86_64.AppImage .
-              chmod +x nethogs-x86_64.AppImage
+              unsquashfs \
+                -d extracted \
+                /mnt/build/nethogs-x86_64.AppImage
 
-              APPIMAGE_EXTRACT_AND_RUN=1 \
-                ./nethogs-x86_64.AppImage \
-                --appimage-extract
-
-              test -x squashfs-root/AppRun
-              test -x squashfs-root/usr/bin/nethogs
+              test -x extracted/AppRun
+              test -x extracted/usr/bin/nethogs
             '
 
-      - name: Test AppImage extraction in Alpine
+            '
+
+      - name: Test AppImage payload in Alpine
         shell: bash
         run: |
           set -euxo pipefail
@@ -384,21 +384,19 @@ jobs:
             -v "$GITHUB_WORKSPACE/work/build:/mnt/build:ro" \
             alpine:3.20 \
             /bin/sh -euxo pipefail -c '
-              apk add --no-cache bash ca-certificates file squashfs-tools
+              apk add --no-cache ca-certificates file squashfs-tools
 
               mkdir -p /tmp/appimage-test
               cd /tmp/appimage-test
 
-              cp /mnt/build/nethogs-x86_64.AppImage .
-              chmod +x nethogs-x86_64.AppImage
+              unsquashfs \
+                -d extracted \
+                /mnt/build/nethogs-x86_64.AppImage
 
-              APPIMAGE_EXTRACT_AND_RUN=1 \
-                ./nethogs-x86_64.AppImage \
-                --appimage-extract
-
-              test -x squashfs-root/AppRun
-              test -x squashfs-root/usr/bin/nethogs
+              test -x extracted/AppRun
+              test -x extracted/usr/bin/nethogs
             '
+
 
       - name: Verify final artifact
         shell: bash
@@ -416,14 +414,12 @@ jobs:
           rm -rf "$WORK/final-extract"
           mkdir -p "$WORK/final-extract"
 
-          cd "$WORK/final-extract"
+          unsquashfs \
+            -d "$WORK/final-extract" \
+            "$APPIMAGE"
 
-          APPIMAGE_EXTRACT_AND_RUN=1 \
-            "$APPIMAGE" \
-            --appimage-extract
-
-          test -x squashfs-root/AppRun
-          test -x squashfs-root/usr/bin/nethogs
+          test -x "$WORK/final-extract/AppRun"
+          test -x "$WORK/final-extract/usr/bin/nethogs"
 
           mkdir -p "$ARTIFACT_DIR"
 
