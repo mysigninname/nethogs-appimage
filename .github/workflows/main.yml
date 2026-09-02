@@ -1,0 +1,563 @@
+name: Build and Test NetHogs AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  NETHOGS_VERSION: "0.9.0"
+  URUNTIME_VERSION: "v0.9.0"
+  SHARUN_VERSION: "v0.8.1"
+  APP_NAME: "NetHogs"
+  APPIMAGE_NAME: "nethogs-x86_64.AppImage"
+  DEBIAN_FRONTEND: noninteractive
+
+jobs:
+  build-test-package:
+    name: Build, test, repair, and package x86_64 AppImage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out workflow repository
+        uses: actions/checkout@v4
+
+      - name: Install build and test dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            clang \
+            cmake \
+            curl \
+            file \
+            fuse3 \
+            gcc \
+            g++ \
+            git \
+            jq \
+            libcap2-bin \
+            libncurses-dev \
+            libpcap-dev \
+            libseccomp-dev \
+            linux-libc-dev \
+            meson \
+            patchelf \
+            pkg-config \
+            python3 \
+            rsync \
+            shellcheck \
+            squashfs-tools \
+            strace \
+            sudo \
+            tar \
+            unzip \
+            util-linux \
+            wget \
+            xz-utils
+
+          sudo modprobe fuse || true
+
+      - name: Prepare source directories
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          rm -rf "$GITHUB_WORKSPACE/work"
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          cd "$GITHUB_WORKSPACE/work"
+
+          curl -L --fail --retry 5 \
+            "https://github.com/raboof/nethogs/archive/refs/tags/v${NETHOGS_VERSION}.tar.gz" \
+            -o "nethogs-${NETHOGS_VERSION}.tar.gz"
+
+          tar -xzf "nethogs-${NETHOGS_VERSION}.tar.gz"
+
+          git clone --depth=1 --branch "${URUNTIME_VERSION}" \
+            https://github.com/VHSgunzo/uruntime.git
+
+          git clone --depth=1 --branch "${SHARUN_VERSION}" \
+            https://github.com/VHSgunzo/sharun.git
+
+      - name: Build uruntime
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$GITHUB_WORKSPACE/work/uruntime"
+
+          rustup toolchain install nightly
+          rustup target add x86_64-unknown-linux-musl --toolchain nightly
+          rustup component add rust-src --toolchain nightly
+
+          cargo +nightly xtask appimage-squashfs-x86_64
+
+          mkdir -p "$GITHUB_WORKSPACE/work/runtime"
+
+          find target -type f \
+            \( -name 'uruntime' -o -name 'uruntime-x86_64' -o -name '*appimage*x86_64*' \) \
+            -executable \
+            -print
+
+          RUNTIME_BIN="$(
+            find target -type f \
+              \( -name 'uruntime' -o -name 'uruntime-x86_64' -o -name '*appimage*x86_64*' \) \
+              -executable \
+              -print -quit
+          )"
+
+          test -n "$RUNTIME_BIN"
+          install -Dm755 "$RUNTIME_BIN" \
+            "$GITHUB_WORKSPACE/work/runtime/uruntime"
+
+          "$GITHUB_WORKSPACE/work/runtime/uruntime" --appimage-version || true
+          file "$GITHUB_WORKSPACE/work/runtime/uruntime"
+
+      - name: Build sharun
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd "$GITHUB_WORKSPACE/work/sharun"
+
+          if [ -f Makefile ]; then
+            make -j"$(nproc)"
+          elif [ -f meson.build ]; then
+            meson setup build
+            meson compile -C build
+          elif [ -f Cargo.toml ]; then
+            cargo build --release
+          fi
+
+          SHARUN_BIN="$(
+            find . -type f \
+              \( -name sharun -o -name quick-sharun \) \
+              -executable \
+              -print -quit
+          )"
+
+          test -n "$SHARUN_BIN"
+          install -Dm755 "$SHARUN_BIN" \
+            "$GITHUB_WORKSPACE/work/runtime/sharun"
+
+          "$GITHUB_WORKSPACE/work/runtime/sharun" --help || true
+
+      - name: Build initial AppImage
+        id: build_initial
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/work/build"
+          cd "$GITHUB_WORKSPACE/work/build"
+
+          rm -rf AppDir nethogs-x86_64.AppImage
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/man/man8
+          mkdir -p AppDir/usr/share/licenses/nethogs
+
+          cd "$GITHUB_WORKSPACE/work/nethogs-${NETHOGS_VERSION}"
+
+          make clean || true
+          make -j"$(nproc)" \
+            CXXFLAGS="-O2 -pipe -fno-semantic-interposition" \
+            LDFLAGS="-Wl,-z,relro,-z,now"
+
+          install -Dm755 src/nethogs \
+            "$GITHUB_WORKSPACE/work/build/AppDir/usr/bin/nethogs"
+
+          if [ -f doc/nethogs.8 ]; then
+            install -Dm644 doc/nethogs.8 \
+              "$GITHUB_WORKSPACE/work/build/AppDir/usr/share/man/man8/nethogs.8"
+          fi
+
+          install -Dm644 COPYING \
+            "$GITHUB_WORKSPACE/work/build/AppDir/usr/share/licenses/nethogs/COPYING"
+
+          cat > "$GITHUB_WORKSPACE/work/build/AppDir/AppRun" <<'EOF'
+          #!/bin/sh
+          set -eu
+
+          APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+          export PATH="$APPDIR/usr/bin:$PATH"
+          export TERM="${TERM:-xterm-256color}"
+
+          exec "$APPDIR/usr/bin/nethogs" "$@"
+          EOF
+
+          chmod 0755 "$GITHUB_WORKSPACE/work/build/AppDir/AppRun"
+
+          "$GITHUB_WORKSPACE/work/runtime/sharun" \
+            -g \
+            -e \
+            -s \
+            -p "$GITHUB_WORKSPACE/work/build/AppDir/usr/bin/nethogs"
+
+          test -x "$GITHUB_WORKSPACE/work/build/AppDir/usr/bin/nethogs"
+
+          chmod +x "$GITHUB_WORKSPACE/work/runtime/uruntime"
+
+          cat "$GITHUB_WORKSPACE/work/runtime/uruntime" \
+            > "$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage"
+
+          mksquashfs \
+            "$GITHUB_WORKSPACE/work/build/AppDir" \
+            "$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage.squashfs" \
+            -noappend \
+            -comp xz \
+            -Xbcj x86 \
+            -all-root \
+            -no-exports \
+            -no-xattrs \
+            -no-progress
+
+          cat "$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage.squashfs" \
+            >> "$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage"
+
+          chmod +x "$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage"
+
+          file "$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage"
+          stat -c '%n %s bytes' \
+            "$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage"
+
+      - name: Run automatic repair loop
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          WORK="$GITHUB_WORKSPACE/work"
+          BUILD="$WORK/build"
+          APPDIR="$BUILD/AppDir"
+          APPIMAGE="$BUILD/nethogs-x86_64.AppImage"
+          NETHOGS="$WORK/nethogs-${NETHOGS_VERSION}"
+          SHARUN="$WORK/runtime/sharun"
+          RUNTIME="$WORK/runtime/uruntime"
+
+          repair_attempt=0
+          max_attempts=5
+
+          build_appimage() {
+            rm -f "$APPIMAGE" "$BUILD/nethogs-x86_64.AppImage.squashfs"
+            rm -rf "$APPDIR"
+
+            mkdir -p \
+              "$APPDIR/usr/bin" \
+              "$APPDIR/usr/share/man/man8" \
+              "$APPDIR/usr/share/licenses/nethogs"
+
+            cd "$NETHOGS"
+
+            make clean >/dev/null 2>&1 || true
+
+            make -j"$(nproc)" \
+              CXXFLAGS="-O2 -pipe -fno-semantic-interposition" \
+              LDFLAGS="-Wl,-z,relro,-z,now"
+
+            install -Dm755 src/nethogs "$APPDIR/usr/bin/nethogs"
+
+            if [ -f doc/nethogs.8 ]; then
+              install -Dm644 doc/nethogs.8 \
+                "$APPDIR/usr/share/man/man8/nethogs.8"
+            fi
+
+            install -Dm644 COPYING \
+              "$APPDIR/usr/share/licenses/nethogs/COPYING"
+
+            cat > "$APPDIR/AppRun" <<'EOF'
+          #!/bin/sh
+          set -eu
+
+          APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+          export PATH="$APPDIR/usr/bin:$PATH"
+          export TERM="${TERM:-xterm-256color}"
+
+          exec "$APPDIR/usr/bin/nethogs" "$@"
+          EOF
+
+            chmod 0755 "$APPDIR/AppRun"
+
+            "$SHARUN" \
+              -g \
+              -e \
+              -s \
+              -p "$APPDIR/usr/bin/nethogs"
+
+            test -x "$APPDIR/usr/bin/nethogs"
+
+            cat "$RUNTIME" > "$APPIMAGE"
+
+            mksquashfs \
+              "$APPDIR" \
+              "$BUILD/nethogs-x86_64.AppImage.squashfs" \
+              -noappend \
+              -comp xz \
+              -Xbcj x86 \
+              -all-root \
+              -no-exports \
+              -no-xattrs \
+              -no-progress
+
+            cat "$BUILD/nethogs-x86_64.AppImage.squashfs" >> "$APPIMAGE"
+            chmod +x "$APPIMAGE"
+
+            test -s "$APPIMAGE"
+            file "$APPIMAGE"
+          }
+
+          test_appimage() {
+            local test_root="$WORK/test-environment"
+
+            rm -rf "$test_root"
+            mkdir -p "$test_root"
+
+            export APPIMAGE_EXTRACT_AND_RUN=1
+            export NO_CLEANUP=1
+            export TMPDIR="$test_root/tmp"
+            mkdir -p "$TMPDIR"
+
+            "$APPIMAGE" --appimage-version >/tmp/nethogs-version.log 2>&1 || true
+            "$APPIMAGE" --appimage-offset >/tmp/nethogs-offset.log 2>&1
+
+            offset="$(tr -dc '0-9\n' < /tmp/nethogs-offset.log | head -n1)"
+            test -n "$offset"
+            test "$offset" -gt 0
+
+            "$APPIMAGE" --appimage-extract \
+              >/tmp/nethogs-extract.log 2>&1
+
+            test -x squashfs-root/usr/bin/nethogs
+            test -x squashfs-root/AppRun
+
+            timeout 10 \
+              "$APPIMAGE" --help \
+              >/tmp/nethogs-help.log 2>&1 || {
+                rc=$?
+                if [ "$rc" -ne 124 ]; then
+                  cat /tmp/nethogs-help.log
+                  return "$rc"
+                fi
+              }
+
+            timeout 10 \
+              "$APPIMAGE" -V \
+              >/tmp/nethogs-v.log 2>&1 || {
+                rc=$?
+                if [ "$rc" -ne 124 ] && [ "$rc" -ne 1 ]; then
+                  cat /tmp/nethogs-v.log
+                  return "$rc"
+                fi
+              }
+
+            ldd squashfs-root/usr/bin/nethogs
+            rm -rf squashfs-root
+
+            "$APPIMAGE" --appimage-extract-and-run --help \
+              >/tmp/nethogs-extract-run.log 2>&1 || {
+                rc=$?
+                if [ "$rc" -ne 124 ] && [ "$rc" -ne 1 ]; then
+                  cat /tmp/nethogs-extract-run.log
+                  return "$rc"
+                fi
+              }
+
+            unset APPIMAGE_EXTRACT_AND_RUN
+            unset NO_CLEANUP
+            unset TMPDIR
+
+            return 0
+          }
+
+          while [ "$repair_attempt" -lt "$max_attempts" ]; do
+            repair_attempt=$((repair_attempt + 1))
+
+            echo "::group::AppImage build attempt ${repair_attempt}"
+
+            if ! build_appimage 2>&1 | tee "$WORK/build-attempt-${repair_attempt}.log"; then
+              echo "Build failed on attempt ${repair_attempt}"
+
+              if grep -Eqi \
+                'ncurses|pcap|not found|No rule to make target|cannot find -l' \
+                "$WORK/build-attempt-${repair_attempt}.log"; then
+                sudo apt-get update
+                sudo apt-get install -y \
+                  libncurses-dev \
+                  libpcap-dev \
+                  libcap2-bin \
+                  pkg-config
+              fi
+
+              if grep -Eqi \
+                'permission denied|operation not permitted' \
+                "$WORK/build-attempt-${repair_attempt}.log"; then
+                chmod -R u+rwX "$WORK"
+              fi
+
+              echo "::endgroup::"
+              continue
+            fi
+
+            echo "::endgroup::"
+            echo "::group::AppImage test attempt ${repair_attempt}"
+
+            if test_appimage 2>&1 | tee "$WORK/test-attempt-${repair_attempt}.log"; then
+              echo "::endgroup::"
+              echo "AppImage build and test succeeded."
+              exit 0
+            fi
+
+            echo "Test failed on attempt ${repair_attempt}"
+
+            if grep -Eqi \
+              'cannot open shared object|no such file or directory|error while loading shared libraries' \
+              "$WORK/test-attempt-${repair_attempt}.log"; then
+              rm -rf "$APPDIR/usr/lib" "$APPDIR/usr/lib64" "$APPDIR/lib" "$APPDIR/lib64"
+              "$SHARUN" \
+                -g \
+                -e \
+                -s \
+                -p "$APPDIR/usr/bin/nethogs" || true
+            fi
+
+            if grep -Eqi 'permission denied|not executable' \
+              "$WORK/test-attempt-${repair_attempt}.log"; then
+              chmod +x "$APPDIR/AppRun" "$APPDIR/usr/bin/nethogs" || true
+            fi
+
+            echo "::endgroup::"
+          done
+
+          echo "The AppImage did not pass the build/test/repair loop."
+          find "$WORK" -maxdepth 2 -type f -name '*.log' -print -exec tail -n 200 {} \;
+          exit 1
+
+      - name: Create isolated test environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          TEST_ROOT="$GITHUB_WORKSPACE/work/final-test-environment"
+          APPIMAGE="$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage"
+
+          rm -rf "$TEST_ROOT"
+          mkdir -p "$TEST_ROOT/home" "$TEST_ROOT/tmp"
+
+          cp "$APPIMAGE" "$TEST_ROOT/nethogs-x86_64.AppImage"
+          chmod +x "$TEST_ROOT/nethogs-x86_64.AppImage"
+
+          HOME="$TEST_ROOT/home" \
+          TMPDIR="$TEST_ROOT/tmp" \
+          APPIMAGE_EXTRACT_AND_RUN=1 \
+          NO_CLEANUP=1 \
+          timeout 15 \
+            "$TEST_ROOT/nethogs-x86_64.AppImage" \
+            --appimage-extract-and-run --help \
+            > "$TEST_ROOT/help.txt" 2>&1 || {
+              rc=$?
+              if [ "$rc" -ne 124 ] && [ "$rc" -ne 1 ]; then
+                cat "$TEST_ROOT/help.txt"
+                exit "$rc"
+              fi
+            }
+
+          test -s "$TEST_ROOT/help.txt"
+
+          HOME="$TEST_ROOT/home" \
+          TMPDIR="$TEST_ROOT/tmp" \
+          "$TEST_ROOT/nethogs-x86_64.AppImage" \
+            --appimage-offset \
+            > "$TEST_ROOT/offset.txt"
+
+          grep -Eq '^[0-9]+$' "$TEST_ROOT/offset.txt"
+
+      - name: Test AppImage in Debian container
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          docker run --rm \
+            --privileged \
+            -v "$GITHUB_WORKSPACE/work/build:/mnt/build:ro" \
+            debian:12-slim \
+            /bin/bash -euxo pipefail -c '
+              apt-get update
+              apt-get install -y ca-certificates file fuse3 libfuse2 procps
+              chmod +x /mnt/build/nethogs-x86_64.AppImage
+              APPIMAGE_EXTRACT_AND_RUN=1 \
+                /mnt/build/nethogs-x86_64.AppImage \
+                --appimage-offset
+              APPIMAGE_EXTRACT_AND_RUN=1 \
+                /mnt/build/nethogs-x86_64.AppImage \
+                --appimage-extract
+              test -x squashfs-root/usr/bin/nethogs
+              test -x squashfs-root/AppRun
+              rm -rf squashfs-root
+            '
+
+      - name: Test AppImage in Alpine container
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          docker run --rm \
+            --privileged \
+            -v "$GITHUB_WORKSPACE/work/build:/mnt/build:ro" \
+            alpine:3.20 \
+            /bin/sh -euxo pipefail -c '
+              apk add --no-cache bash ca-certificates file fuse3 libstdc++
+              chmod +x /mnt/build/nethogs-x86_64.AppImage
+              APPIMAGE_EXTRACT_AND_RUN=1 \
+                /mnt/build/nethogs-x86_64.AppImage \
+                --appimage-offset
+              APPIMAGE_EXTRACT_AND_RUN=1 \
+                /mnt/build/nethogs-x86_64.AppImage \
+                --appimage-extract
+              test -x squashfs-root/usr/bin/nethogs
+              test -x squashfs-root/AppRun
+              rm -rf squashfs-root
+            '
+
+      - name: Verify final artifact
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          APPIMAGE="$GITHUB_WORKSPACE/work/build/nethogs-x86_64.AppImage"
+
+          test -f "$APPIMAGE"
+          test -x "$APPIMAGE"
+          test -s "$APPIMAGE"
+
+          "$APPIMAGE" --appimage-offset
+          "$APPIMAGE" --appimage-version || true
+
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          cp "$APPIMAGE" \
+            "$GITHUB_WORKSPACE/artifacts/${APPIMAGE_NAME}"
+
+          sha256sum "$GITHUB_WORKSPACE/artifacts/${APPIMAGE_NAME}" \
+            | tee "$GITHUB_WORKSPACE/artifacts/${APPIMAGE_NAME}.sha256"
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nethogs-${{ env.NETHOGS_VERSION }}-x86_64-AppImage
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
